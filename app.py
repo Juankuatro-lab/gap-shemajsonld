@@ -293,7 +293,7 @@ def main():
             st.warning("Aucune donnée structurée trouvée sur votre site.")
         
         # Données manquantes
-        st.subheader("Données Structurées Manquantes")
+        st.subheader("Données structurées manquantes")
         
         if not comparison_df.empty:
             st.dataframe(comparison_df, use_container_width=True)
@@ -328,7 +328,7 @@ def main():
             st.success("Excellente nouvelle ! Votre site contient toutes les données structurées présentes chez vos concurrents.")
         
         # Données des concurrents
-        st.subheader("Données Structurées des Concurrents")
+        st.subheader("Données structurées des concurrents")
         
         for competitor_name, competitor_data in competitors_structured_data.items():
             with st.expander(f"{competitor_name}"):
