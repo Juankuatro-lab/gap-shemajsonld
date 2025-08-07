@@ -1364,18 +1364,32 @@ def main():
         # Affichage des résultats
         st.header("Résultats de l'analyse")
         
-        # Données structurées du client
-        st.subheader("Vos données structurées")
+        # Fonction helper pour extraire le type principal des données
+        def get_main_type(data):
+            if '@type' in data:
+                data_type = data['@type']
+                if isinstance(data_type, list):
+                    return data_type[0] if data_type else "Type inconnu"
+                return data_type
+            return "Type inconnu"
+        
+        # 1. Données structurées déjà présentes sur votre site
+        st.subheader("Données structurées déjà présentes sur votre site")
         if client_structured_data:
+            client_types_found = set()
             for category, data_list in client_structured_data.items():
-                with st.expander(f"{category} ({len(data_list)} élément(s))"):
-                    for i, data in enumerate(data_list):
-                        st.json(data)
+                for data in data_list:
+                    main_type = get_main_type(data)
+                    if main_type != "Type inconnu":
+                        client_types_found.add(main_type)
+                        st.write(f"**{main_type}**")
+                        with st.expander("Voir le code JSON"):
+                            st.code(json.dumps(data, indent=2, ensure_ascii=False), language='json')
         else:
             st.warning("Aucune donnée structurée trouvée sur votre site.")
         
-        # Données manquantes
-        st.subheader("Données structurées manquantes")
+        # 2. Données structurées présentes chez les concurrents mais pas sur votre site
+        st.subheader("Données structurées présentes chez les concurrents mais pas sur votre site")
         
         if comparison_results:
             st.info(f"**{len(comparison_results)} type(s) de données structurées** sont présents chez vos concurrents mais absents de votre site.")
@@ -1424,37 +1438,47 @@ def main():
                 mime="text/csv"
             )
             
-            # Statistiques
-            st.subheader("Statistiques")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Types de données manquants", len(comparison_results))
-            
-            with col2:
-                total_competitors = len(competitors_structured_data)
-                st.metric("Concurrents analysés", total_competitors)
-            
-            with col3:
-                most_common = max(comparison_results.items(), key=lambda x: len(x[1]['competitors_with_data']))[0] if comparison_results else "N/A"
-                st.metric("Type le plus fréquent", most_common)
-            
         else:
             st.success("Excellente nouvelle ! Votre site contient toutes les données structurées présentes chez vos concurrents.")
         
-        # Données des concurrents
-        st.subheader("Données structurées des concurrents")
+        # 3 et 4. Données structurées de chaque concurrent
+        competitor_names = list(competitors_structured_data.keys())
         
-        for competitor_name, competitor_data in competitors_structured_data.items():
-            with st.expander(f"{competitor_name}"):
-                if competitor_data:
-                    for category, data_list in competitor_data.items():
-                        st.write(f"**{category}** ({len(data_list)} élément(s))")
-                        for i, data in enumerate(data_list):
-                            with st.container():
-                                st.json(data)
-                else:
-                    st.warning(f"Aucune donnée structurée trouvée pour {competitor_name}")
+        for idx, (competitor_name, competitor_data) in enumerate(competitors_structured_data.items(), 1):
+            st.subheader(f"Données structurées présentes chez {competitor_name}")
+            
+            if competitor_data:
+                competitor_types_found = set()
+                for category, data_list in competitor_data.items():
+                    for data in data_list:
+                        main_type = get_main_type(data)
+                        if main_type != "Type inconnu":
+                            if main_type not in competitor_types_found:
+                                competitor_types_found.add(main_type)
+                                st.write(f"**{main_type}**")
+                                with st.expander("Voir le code JSON"):
+                                    st.code(json.dumps(data, indent=2, ensure_ascii=False), language='json')
+            else:
+                st.warning(f"Aucune donnée structurée trouvée pour {competitor_name}")
+        
+        # Statistiques globales
+        st.subheader("Statistiques globales")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            missing_count = len(comparison_results) if comparison_results else 0
+            st.metric("Types de données manquants", missing_count)
+        
+        with col2:
+            total_competitors = len(competitors_structured_data)
+            st.metric("Concurrents analysés", total_competitors)
+        
+        with col3:
+            if comparison_results:
+                most_common = max(comparison_results.items(), key=lambda x: len(x[1]['competitors_with_data']))[0]
+            else:
+                most_common = "N/A"
+            st.metric("Type le plus fréquent manquant", most_common)
 
 if __name__ == "__main__":
     main()
