@@ -197,15 +197,30 @@ def compare_structured_data(client_data: Dict[str, List[Dict]], competitors_data
 
 def main():
     st.set_page_config(
-        page_title="Comparateur de Données Structurées",
+        page_title="Comparateur de données structurées",
         layout="wide"
     )
     
-    st.title("Comparateur de Données Structurées")
+    # Style CSS pour le bouton
+    st.markdown("""
+    <style>
+    .stButton > button {
+        background-color: #f6f6ec !important;
+        color: #76520e !important;
+        border: 1px solid #76520e !important;
+    }
+    .stButton > button:hover {
+        background-color: #eeeedc !important;
+        color: #76520e !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    st.title("Comparateur de données structurées")
     st.markdown("Analysez et comparez les données structurées entre votre site et vos concurrents")
     
     # Zone d'entrée pour le client
-    st.header("Votre Site Web (Client)")
+    st.header("Votre site web (client)")
     client_html = st.text_area(
         "Collez le code HTML complet de votre page :",
         height=200,
@@ -213,7 +228,7 @@ def main():
     )
     
     # Zones d'entrée pour les concurrents
-    st.header("Sites Concurrents")
+    st.header("Sites concurrents")
     
     num_competitors = st.number_input(
         "Nombre de concurrents à analyser :",
@@ -243,7 +258,7 @@ def main():
             competitors_data[competitor_name] = competitor_html
     
     # Bouton d'analyse
-    if st.button("Analyser et Comparer", type="primary"):
+    if st.button("Analyser et comparer", type="primary"):
         if not client_html.strip():
             st.error("Veuillez entrer le code HTML de votre site.")
             return
@@ -265,10 +280,10 @@ def main():
             comparison_df = compare_structured_data(client_structured_data, competitors_structured_data)
             
         # Affichage des résultats
-        st.header("Résultats de l'Analyse")
+        st.header("Résultats de l'analyse")
         
         # Données structurées du client
-        st.subheader("Vos Données Structurées")
+        st.subheader("Vos données structurées")
         if client_structured_data:
             for category, data_list in client_structured_data.items():
                 with st.expander(f"{category} ({len(data_list)} élément(s))"):
