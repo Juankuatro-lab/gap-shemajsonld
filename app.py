@@ -198,18 +198,14 @@ def compare_structured_data(client_data: Dict[str, List[Dict]], competitors_data
 def main():
     st.set_page_config(
         page_title="Comparateur de Données Structurées",
-        page_icon="🔍",
         layout="wide"
     )
     
-    st.title("🔍 Comparateur de Données Structurées")
+    st.title("Comparateur de Données Structurées")
     st.markdown("Analysez et comparez les données structurées entre votre site et vos concurrents")
     
-    # Sidebar pour les paramètres
-    st.sidebar.header("Configuration")
-    
     # Zone d'entrée pour le client
-    st.header("📋 Votre Site Web (Client)")
+    st.header("Votre Site Web (Client)")
     client_html = st.text_area(
         "Collez le code HTML complet de votre page :",
         height=200,
@@ -217,7 +213,7 @@ def main():
     )
     
     # Zones d'entrée pour les concurrents
-    st.header("🏢 Sites Concurrents")
+    st.header("Sites Concurrents")
     
     num_competitors = st.number_input(
         "Nombre de concurrents à analyser :",
@@ -247,7 +243,7 @@ def main():
             competitors_data[competitor_name] = competitor_html
     
     # Bouton d'analyse
-    if st.button("🚀 Analyser et Comparer", type="primary"):
+    if st.button("Analyser et Comparer", type="primary"):
         if not client_html.strip():
             st.error("Veuillez entrer le code HTML de votre site.")
             return
@@ -269,10 +265,10 @@ def main():
             comparison_df = compare_structured_data(client_structured_data, competitors_structured_data)
             
         # Affichage des résultats
-        st.header("📊 Résultats de l'Analyse")
+        st.header("Résultats de l'Analyse")
         
         # Données structurées du client
-        st.subheader("🏠 Vos Données Structurées")
+        st.subheader("Vos Données Structurées")
         if client_structured_data:
             for category, data_list in client_structured_data.items():
                 with st.expander(f"{category} ({len(data_list)} élément(s))"):
@@ -282,7 +278,7 @@ def main():
             st.warning("Aucune donnée structurée trouvée sur votre site.")
         
         # Données manquantes
-        st.subheader("❌ Données Structurées Manquantes")
+        st.subheader("Données Structurées Manquantes")
         
         if not comparison_df.empty:
             st.dataframe(comparison_df, use_container_width=True)
@@ -293,14 +289,14 @@ def main():
             csv_data = csv_buffer.getvalue()
             
             st.download_button(
-                label="📥 Télécharger les résultats (CSV)",
+                label="Télécharger les résultats (CSV)",
                 data=csv_data,
                 file_name="donnees_structurees_manquantes.csv",
                 mime="text/csv"
             )
             
             # Statistiques
-            st.subheader("📈 Statistiques")
+            st.subheader("Statistiques")
             col1, col2, col3 = st.columns(3)
             
             with col1:
@@ -314,13 +310,13 @@ def main():
                 st.metric("Type le plus fréquent", most_common)
             
         else:
-            st.success("🎉 Excellente nouvelle ! Votre site contient toutes les données structurées présentes chez vos concurrents.")
+            st.success("Excellente nouvelle ! Votre site contient toutes les données structurées présentes chez vos concurrents.")
         
         # Données des concurrents
-        st.subheader("🏢 Données Structurées des Concurrents")
+        st.subheader("Données Structurées des Concurrents")
         
         for competitor_name, competitor_data in competitors_structured_data.items():
-            with st.expander(f"📊 {competitor_name}"):
+            with st.expander(f"{competitor_name}"):
                 if competitor_data:
                     for category, data_list in competitor_data.items():
                         st.write(f"**{category}** ({len(data_list)} élément(s))")
