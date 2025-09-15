@@ -1,1484 +1,655 @@
 import streamlit as st
-import pandas as pd
-import json
-import re
+import requests
 from bs4 import BeautifulSoup
-from typing import Dict, List, Set, Any
+import pandas as pd
+import time
+import re
+from urllib.parse import urljoin, urlparse, parse_qs
+import random
+from datetime import datetime
+import json
+from textblob import TextBlob
 import io
 
-def extract_json_ld(soup: BeautifulSoup) -> List[Dict]:
-    """Extrait les données JSON-LD du HTML"""
-    json_ld_scripts = soup.find_all('script', type='application/ld+json')
-    json_ld_data = []
+# Configuration de la page Streamlit
+st.set_page_config(
+    page_title="Extracteur d'avis Amazon - Batch",
+    page_icon="📝",
+    layout="wide"
+)
+
+class SentimentAnalyzer:
+    """Analyseur de sentiment pour les commentaires"""
     
-    for script in json_ld_scripts:
+    @staticmethod
+    def analyze_sentiment(text):
+        """Analyse le sentiment d'un texte et retourne un label"""
+        if not text or len(text.strip()) < 3:
+            return "Neutre"
+        
         try:
-            data = json.loads(script.string or '')
-            if isinstance(data, list):
-                json_ld_data.extend(data)
-            else:
-                json_ld_data.append(data)
-        except (json.JSONDecodeError, AttributeError):
-            continue
-    
-    return json_ld_data
-
-def extract_microdata(soup: BeautifulSoup) -> List[Dict]:
-    """Extrait les microdonnées du HTML"""
-    microdata = []
-    items = soup.find_all(attrs={'itemscope': True})
-    
-    for item in items:
-        item_data = {}
-        item_type = item.get('itemtype', '')
-        if item_type:
-            item_data['@type'] = item_type.split('/')[-1]
-        
-        properties = item.find_all(attrs={'itemprop': True})
-        for prop in properties:
-            prop_name = prop.get('itemprop')
-            prop_value = prop.get('content') or prop.get_text(strip=True)
-            if prop_name and prop_value:
-                item_data[prop_name] = prop_value
-        
-        if item_data:
-            microdata.append(item_data)
-    
-    return microdata
-
-def extract_open_graph(soup: BeautifulSoup) -> Dict:
-    """Extrait les métadonnées Open Graph"""
-    og_data = {}
-    og_tags = soup.find_all('meta', property=lambda x: x and x.startswith('og:'))
-    
-    for tag in og_tags:
-        property_name = tag.get('property', '').replace('og:', '')
-        content = tag.get('content', '')
-        if property_name and content:
-            og_data[property_name] = content
-    
-    return {'@type': 'OpenGraph', **og_data} if og_data else {}
-
-def extract_twitter_cards(soup: BeautifulSoup) -> Dict:
-    """Extrait les métadonnées Twitter Cards"""
-    twitter_data = {}
-    twitter_tags = soup.find_all('meta', attrs={'name': lambda x: x and x.startswith('twitter:')})
-    
-    for tag in twitter_tags:
-        name = tag.get('name', '').replace('twitter:', '')
-        content = tag.get('content', '')
-        if name and content:
-            twitter_data[name] = content
-    
-    return {'@type': 'TwitterCard', **twitter_data} if twitter_data else {}
-
-def extract_meta_tags(soup: BeautifulSoup) -> Dict:
-    """Extrait les métadonnées importantes"""
-    meta_data = {}
-    
-    # Description
-    desc_tag = soup.find('meta', attrs={'name': 'description'})
-    if desc_tag:
-        meta_data['description'] = desc_tag.get('content', '')
-    
-    # Keywords
-    keywords_tag = soup.find('meta', attrs={'name': 'keywords'})
-    if keywords_tag:
-        meta_data['keywords'] = keywords_tag.get('content', '')
-    
-    # Title
-    title_tag = soup.find('title')
-    if title_tag:
-        meta_data['title'] = title_tag.get_text(strip=True)
-    
-    return {'@type': 'MetaTags', **meta_data} if meta_data else {}
-
-def extract_structured_data(html_content: str) -> Dict[str, List[Dict]]:
-    """Extrait toutes les données structurées du HTML"""
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    structured_data = {
-        'JSON-LD': extract_json_ld(soup),
-        'Microdata': extract_microdata(soup),
-        'OpenGraph': [extract_open_graph(soup)] if extract_open_graph(soup) else [],
-        'TwitterCards': [extract_twitter_cards(soup)] if extract_twitter_cards(soup) else [],
-        'MetaTags': [extract_meta_tags(soup)] if extract_meta_tags(soup) else []
-    }
-    
-    # Supprimer les catégories vides
-    structured_data = {k: v for k, v in structured_data.items() if v}
-    
-    return structured_data
-
-def get_data_types_set(structured_data: Dict[str, List[Dict]]) -> Set[str]:
-    """Récupère l'ensemble des types de données présents"""
-    types_set = set()
-    
-    for category, data_list in structured_data.items():
-        for data in data_list:
-            if '@type' in data:
-                data_type = data['@type']
-                if isinstance(data_type, list):
-                    types_set.update(data_type)
-                else:
-                    types_set.add(data_type)
-            else:
-                types_set.add(category)
-    
-    return types_set
-
-def flatten_data_for_comparison(structured_data: Dict[str, List[Dict]]) -> Dict[str, Dict]:
-    """Aplatit les données pour faciliter la comparaison"""
-    flattened = {}
-    
-    for category, data_list in structured_data.items():
-        for i, data in enumerate(data_list):
-            data_type = data.get('@type', category)
-            if isinstance(data_type, list):
-                data_type = ', '.join(data_type)
+            # Utilisation de TextBlob pour l'analyse de sentiment
+            blob = TextBlob(text)
+            polarity = blob.sentiment.polarity
             
-            key = f"{data_type}_{i}" if len(data_list) > 1 else data_type
-            flattened[key] = data
-    
-    return flattened
+            if polarity > 0.1:
+                return "Positif"
+            elif polarity < -0.1:
+                return "Négatif"
+            else:
+                return "Neutre"
+        except:
+            return "Neutre"
 
-def get_schema_org_example(data_type: str) -> str:
-    """Retourne un exemple de code JSON-LD selon schema.org pour un type donné"""
-    examples = {
-        # Thing - Base class
-        'Thing': {
-            "@context": "https://schema.org",
-            "@type": "Thing",
-            "name": "Nom de l'élément",
-            "description": "Description de l'élément",
-            "url": "https://www.example.com",
-            "image": "https://www.example.com/image.jpg"
-        },
-        
-        # Action types
-        'Action': {
-            "@context": "https://schema.org",
-            "@type": "Action",
-            "name": "Action générique",
-            "agent": {
-                "@type": "Person",
-                "name": "Agent de l'action"
-            },
-            "startTime": "2024-01-01T10:00:00"
-        },
-        'ConsumeAction': {
-            "@context": "https://schema.org",
-            "@type": "ConsumeAction",
-            "agent": {
-                "@type": "Person",
-                "name": "Consommateur"
-            },
-            "object": {
-                "@type": "Product",
-                "name": "Produit consommé"
-            }
-        },
-        'WatchAction': {
-            "@context": "https://schema.org",
-            "@type": "WatchAction",
-            "agent": {
-                "@type": "Person",
-                "name": "Spectateur"
-            },
-            "object": {
-                "@type": "Movie",
-                "name": "Film regardé"
-            }
-        },
-        'ReadAction': {
-            "@context": "https://schema.org",
-            "@type": "ReadAction",
-            "agent": {
-                "@type": "Person",
-                "name": "Lecteur"
-            },
-            "object": {
-                "@type": "Article",
-                "name": "Article lu"
-            }
-        },
-        'BuyAction': {
-            "@context": "https://schema.org",
-            "@type": "BuyAction",
-            "agent": {
-                "@type": "Person",
-                "name": "Acheteur"
-            },
-            "object": {
-                "@type": "Product",
-                "name": "Produit acheté"
-            },
-            "price": "99.99",
-            "priceCurrency": "EUR"
-        },
-        'SearchAction': {
-            "@context": "https://schema.org",
-            "@type": "SearchAction",
-            "target": "https://www.example.com/search?q={search_term_string}",
-            "query-input": "required name=search_term_string"
-        },
-        'ReviewAction': {
-            "@context": "https://schema.org",
-            "@type": "ReviewAction",
-            "agent": {
-                "@type": "Person",
-                "name": "Reviewer"
-            },
-            "object": {
-                "@type": "Product",
-                "name": "Produit évalué"
-            },
-            "result": {
-                "@type": "Review",
-                "reviewRating": {
-                    "@type": "Rating",
-                    "ratingValue": "5"
-                }
-            }
-        },
-        'ShareAction': {
-            "@context": "https://schema.org",
-            "@type": "ShareAction",
-            "agent": {
-                "@type": "Person",
-                "name": "Partageur"
-            },
-            "object": {
-                "@type": "Article",
-                "name": "Article partagé"
-            }
-        },
-        
-        # CreativeWork types
-        'CreativeWork': {
-            "@context": "https://schema.org",
-            "@type": "CreativeWork",
-            "name": "Œuvre créative",
-            "author": {
-                "@type": "Person",
-                "name": "Auteur"
-            },
-            "datePublished": "2024-01-01"
-        },
-        'Article': {
-            "@context": "https://schema.org",
-            "@type": "Article",
-            "headline": "Titre de l'article",
-            "author": {
-                "@type": "Person",
-                "name": "Nom de l'auteur"
-            },
-            "datePublished": "2024-01-01",
-            "dateModified": "2024-01-01",
-            "image": "https://www.example.com/article-image.jpg",
-            "publisher": {
-                "@type": "Organization",
-                "name": "Nom du site",
-                "logo": {
-                    "@type": "ImageObject",
-                    "url": "https://www.example.com/logo.png"
-                }
-            }
-        },
-        'BlogPosting': {
-            "@context": "https://schema.org",
-            "@type": "BlogPosting",
-            "headline": "Titre du blog post",
-            "author": {
-                "@type": "Person",
-                "name": "Nom de l'auteur"
-            },
-            "datePublished": "2024-01-01",
-            "image": "https://www.example.com/blog-image.jpg",
-            "wordCount": 1500
-        },
-        'NewsArticle': {
-            "@context": "https://schema.org",
-            "@type": "NewsArticle",
-            "headline": "Titre de l'actualité",
-            "author": {
-                "@type": "Person",
-                "name": "Journaliste"
-            },
-            "datePublished": "2024-01-01",
-            "image": "https://www.example.com/news.jpg",
-            "publisher": {
-                "@type": "Organization",
-                "name": "Média"
-            }
-        },
-        'Recipe': {
-            "@context": "https://schema.org",
-            "@type": "Recipe",
-            "name": "Nom de la recette",
-            "author": {
-                "@type": "Person",
-                "name": "Chef"
-            },
-            "cookTime": "PT30M",
-            "prepTime": "PT15M",
-            "recipeYield": "4 portions",
-            "recipeIngredient": ["Ingrédient 1", "Ingrédient 2"],
-            "recipeInstructions": [
-                {
-                    "@type": "HowToStep",
-                    "text": "Étape 1 de la recette"
-                }
-            ],
-            "nutrition": {
-                "@type": "NutritionInformation",
-                "calories": "300 calories"
-            }
-        },
-        'Book': {
-            "@context": "https://schema.org",
-            "@type": "Book",
-            "name": "Titre du livre",
-            "author": {
-                "@type": "Person",
-                "name": "Auteur"
-            },
-            "isbn": "978-0123456789",
-            "genre": "Fiction",
-            "publisher": {
-                "@type": "Organization",
-                "name": "Maison d'édition"
-            },
-            "datePublished": "2024-01-01"
-        },
-        'Movie': {
-            "@context": "https://schema.org",
-            "@type": "Movie",
-            "name": "Titre du film",
-            "director": {
-                "@type": "Person",
-                "name": "Réalisateur"
-            },
-            "actor": [
-                {
-                    "@type": "Person",
-                    "name": "Acteur principal"
-                }
-            ],
-            "datePublished": "2024-01-01",
-            "duration": "PT120M"
-        },
-        'VideoObject': {
-            "@context": "https://schema.org",
-            "@type": "VideoObject",
-            "name": "Titre de la vidéo",
-            "description": "Description de la vidéo",
-            "uploadDate": "2024-01-01",
-            "contentUrl": "https://www.example.com/video.mp4",
-            "thumbnailUrl": "https://www.example.com/thumbnail.jpg",
-            "duration": "PT10M"
-        },
-        'AudioObject': {
-            "@context": "https://schema.org",
-            "@type": "AudioObject",
-            "name": "Titre de l'audio",
-            "description": "Description de l'audio",
-            "contentUrl": "https://www.example.com/audio.mp3",
-            "duration": "PT5M"
-        },
-        'ImageObject': {
-            "@context": "https://schema.org",
-            "@type": "ImageObject",
-            "name": "Titre de l'image",
-            "description": "Description de l'image",
-            "contentUrl": "https://www.example.com/image.jpg",
-            "width": "1920",
-            "height": "1080"
-        },
-        'Course': {
-            "@context": "https://schema.org",
-            "@type": "Course",
-            "name": "Nom du cours",
-            "description": "Description du cours",
-            "provider": {
-                "@type": "Organization",
-                "name": "Organisme de formation"
-            },
-            "courseCode": "COURS101",
-            "educationalLevel": "Débutant"
-        },
-        'Dataset': {
-            "@context": "https://schema.org",
-            "@type": "Dataset",
-            "name": "Nom du jeu de données",
-            "description": "Description du dataset",
-            "creator": {
-                "@type": "Organization",
-                "name": "Créateur"
-            },
-            "dateModified": "2024-01-01",
-            "license": "https://creativecommons.org/licenses/by/4.0/"
-        },
-        'WebSite': {
-            "@context": "https://schema.org",
-            "@type": "WebSite",
-            "name": "Nom du site",
-            "url": "https://www.example.com",
-            "potentialAction": {
-                "@type": "SearchAction",
-                "target": "https://www.example.com/search?q={search_term_string}",
-                "query-input": "required name=search_term_string"
-            }
-        },
-        'WebPage': {
-            "@context": "https://schema.org",
-            "@type": "WebPage",
-            "name": "Titre de la page",
-            "url": "https://www.example.com/page",
-            "description": "Description de la page",
-            "isPartOf": {
-                "@type": "WebSite",
-                "name": "Nom du site"
-            }
-        },
-        'SoftwareApplication': {
-            "@context": "https://schema.org",
-            "@type": "SoftwareApplication",
-            "name": "Nom de l'application",
-            "applicationCategory": "BusinessApplication",
-            "operatingSystem": "Windows, macOS, Linux",
-            "offers": {
-                "@type": "Offer",
-                "price": "0",
-                "priceCurrency": "EUR"
-            }
-        },
-        'TVSeries': {
-            "@context": "https://schema.org",
-            "@type": "TVSeries",
-            "name": "Nom de la série",
-            "numberOfSeasons": "5",
-            "numberOfEpisodes": "100",
-            "genre": "Drame"
-        },
-        'Podcast': {
-            "@context": "https://schema.org",
-            "@type": "Podcast",
-            "name": "Nom du podcast",
-            "description": "Description du podcast",
-            "author": {
-                "@type": "Person",
-                "name": "Créateur"
-            }
-        },
-        
-        # Event types
-        'Event': {
-            "@context": "https://schema.org",
-            "@type": "Event",
-            "name": "Nom de l'événement",
-            "startDate": "2024-07-01T19:00:00+02:00",
-            "endDate": "2024-07-01T22:00:00+02:00",
-            "location": {
-                "@type": "Place",
-                "name": "Lieu de l'événement",
-                "address": {
-                    "@type": "PostalAddress",
-                    "streetAddress": "123 Rue Example",
-                    "addressLocality": "Paris",
-                    "postalCode": "75001",
-                    "addressCountry": "FR"
-                }
-            },
-            "organizer": {
-                "@type": "Organization",
-                "name": "Organisateur"
-            }
-        },
-        'MusicEvent': {
-            "@context": "https://schema.org",
-            "@type": "MusicEvent",
-            "name": "Concert",
-            "startDate": "2024-07-01T20:00:00+02:00",
-            "performer": {
-                "@type": "MusicGroup",
-                "name": "Nom du groupe"
-            },
-            "location": {
-                "@type": "MusicVenue",
-                "name": "Salle de concert"
-            }
-        },
-        'SportsEvent': {
-            "@context": "https://schema.org",
-            "@type": "SportsEvent",
-            "name": "Match de football",
-            "startDate": "2024-07-01T15:00:00+02:00",
-            "competitor": [
-                {
-                    "@type": "SportsTeam",
-                    "name": "Équipe A"
-                },
-                {
-                    "@type": "SportsTeam",
-                    "name": "Équipe B"
-                }
-            ]
-        },
-        'BusinessEvent': {
-            "@context": "https://schema.org",
-            "@type": "BusinessEvent",
-            "name": "Conférence d'affaires",
-            "startDate": "2024-07-01T09:00:00+02:00",
-            "organizer": {
-                "@type": "Organization",
-                "name": "Organisateur professionnel"
-            }
-        },
-        'TheaterEvent': {
-            "@context": "https://schema.org",
-            "@type": "TheaterEvent",
-            "name": "Pièce de théâtre",
-            "startDate": "2024-07-01T20:00:00+02:00",
-            "performer": {
-                "@type": "Person",
-                "name": "Acteur principal"
-            }
-        },
-        'Festival': {
-            "@context": "https://schema.org",
-            "@type": "Festival",
-            "name": "Festival de musique",
-            "startDate": "2024-07-01",
-            "endDate": "2024-07-03",
-            "location": {
-                "@type": "Place",
-                "name": "Parc du festival"
-            }
-        },
-        
-        # Organization types
-        'Organization': {
-            "@context": "https://schema.org",
-            "@type": "Organization",
-            "name": "Nom de votre organisation",
-            "url": "https://www.example.com",
-            "logo": "https://www.example.com/logo.png",
-            "contactPoint": {
-                "@type": "ContactPoint",
-                "telephone": "+33-1-23-45-67-89",
-                "contactType": "customer service"
-            },
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            }
-        },
-        'LocalBusiness': {
-            "@context": "https://schema.org",
-            "@type": "LocalBusiness",
-            "name": "Nom de votre entreprise",
-            "image": "https://www.example.com/photo.jpg",
-            "telephone": "+33-1-23-45-67-89",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            },
-            "openingHoursSpecification": [
-                {
-                    "@type": "OpeningHoursSpecification",
-                    "dayOfWeek": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-                    "opens": "09:00",
-                    "closes": "18:00"
-                }
-            ]
-        },
-        'Restaurant': {
-            "@context": "https://schema.org",
-            "@type": "Restaurant",
-            "name": "Nom du restaurant",
-            "image": "https://www.example.com/restaurant.jpg",
-            "telephone": "+33-1-23-45-67-89",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            },
-            "servesCuisine": "Française",
-            "priceRange": "€€",
-            "menu": "https://www.example.com/menu"
-        },
-        'Store': {
-            "@context": "https://schema.org",
-            "@type": "Store",
-            "name": "Nom du magasin",
-            "image": "https://www.example.com/store.jpg",
-            "telephone": "+33-1-23-45-67-89",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            }
-        },
-        'Hospital': {
-            "@context": "https://schema.org",
-            "@type": "Hospital",
-            "name": "Nom de l'hôpital",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            },
-            "telephone": "+33-1-23-45-67-89",
-            "medicalSpecialty": "Médecine générale"
-        },
-        'School': {
-            "@context": "https://schema.org",
-            "@type": "School",
-            "name": "Nom de l'école",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            }
-        },
-        'University': {
-            "@context": "https://schema.org",
-            "@type": "University",
-            "name": "Nom de l'université",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            }
-        },
-        'NGO': {
-            "@context": "https://schema.org",
-            "@type": "NGO",
-            "name": "Nom de l'ONG",
-            "description": "Description de l'ONG",
-            "url": "https://www.example.com"
-        },
-        
-        # Person
-        'Person': {
-            "@context": "https://schema.org",
-            "@type": "Person",
-            "name": "Prénom Nom",
-            "jobTitle": "Titre du poste",
-            "worksFor": {
-                "@type": "Organization",
-                "name": "Nom de l'organisation"
-            },
-            "url": "https://www.example.com/profile",
-            "image": "https://www.example.com/photo.jpg",
-            "email": "email@example.com",
-            "telephone": "+33-1-23-45-67-89"
-        },
-        
-        # Place types
-        'Place': {
-            "@context": "https://schema.org",
-            "@type": "Place",
-            "name": "Nom du lieu",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            },
-            "geo": {
-                "@type": "GeoCoordinates",
-                "latitude": "48.8566",
-                "longitude": "2.3522"
-            }
-        },
-        'TouristAttraction': {
-            "@context": "https://schema.org",
-            "@type": "TouristAttraction",
-            "name": "Attraction touristique",
-            "description": "Description de l'attraction",
-            "address": {
-                "@type": "PostalAddress",
-                "addressLocality": "Paris",
-                "addressCountry": "FR"
-            }
-        },
-        'Accommodation': {
-            "@context": "https://schema.org",
-            "@type": "Accommodation",
-            "name": "Nom de l'hébergement",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            }
-        },
-        'Hotel': {
-            "@context": "https://schema.org",
-            "@type": "Hotel",
-            "name": "Nom de l'hôtel",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            },
-            "checkinTime": "15:00",
-            "checkoutTime": "11:00"
-        },
-        
-        # Product types
-        'Product': {
-            "@context": "https://schema.org",
-            "@type": "Product",
-            "name": "Nom du produit",
-            "image": "https://www.example.com/product.jpg",
-            "description": "Description du produit",
-            "brand": {
-                "@type": "Brand",
-                "name": "Marque"
-            },
-            "offers": {
-                "@type": "Offer",
-                "price": "29.99",
-                "priceCurrency": "EUR",
-                "availability": "https://schema.org/InStock",
-                "seller": {
-                    "@type": "Organization",
-                    "name": "Vendeur"
-                }
-            },
-            "aggregateRating": {
-                "@type": "AggregateRating",
-                "ratingValue": "4.5",
-                "reviewCount": "123"
-            }
-        },
-        'Service': {
-            "@context": "https://schema.org",
-            "@type": "Service",
-            "name": "Nom du service",
-            "description": "Description du service",
-            "provider": {
-                "@type": "Organization",
-                "name": "Prestataire"
-            },
-            "areaServed": "Paris",
-            "hasOfferCatalog": {
-                "@type": "OfferCatalog",
-                "name": "Catalogue de services"
-            }
-        },
-        
-        # Intangible types
-        'Brand': {
-            "@context": "https://schema.org",
-            "@type": "Brand",
-            "name": "Nom de la marque",
-            "logo": "https://www.example.com/logo.png",
-            "url": "https://www.example.com"
-        },
-        'Rating': {
-            "@context": "https://schema.org",
-            "@type": "Rating",
-            "ratingValue": "4.5",
-            "bestRating": "5",
-            "worstRating": "1"
-        },
-        'Review': {
-            "@context": "https://schema.org",
-            "@type": "Review",
-            "reviewBody": "Texte de l'avis",
-            "reviewRating": {
-                "@type": "Rating",
-                "ratingValue": "5",
-                "bestRating": "5"
-            },
-            "author": {
-                "@type": "Person",
-                "name": "Nom du reviewer"
-            },
-            "itemReviewed": {
-                "@type": "Thing",
-                "name": "Produit/Service évalué"
-            }
-        },
-        'AggregateRating': {
-            "@context": "https://schema.org",
-            "@type": "AggregateRating",
-            "ratingValue": "4.5",
-            "reviewCount": "123",
-            "bestRating": "5",
-            "worstRating": "1"
-        },
-        'ContactPoint': {
-            "@context": "https://schema.org",
-            "@type": "ContactPoint",
-            "telephone": "+33-1-23-45-67-89",
-            "contactType": "customer service",
-            "areaServed": "FR",
-            "availableLanguage": ["French", "English"]
-        },
-        'PostalAddress': {
-            "@context": "https://schema.org",
-            "@type": "PostalAddress",
-            "streetAddress": "123 Rue Example",
-            "addressLocality": "Paris",
-            "postalCode": "75001",
-            "addressCountry": "FR"
-        },
-        'GeoCoordinates': {
-            "@context": "https://schema.org",
-            "@type": "GeoCoordinates",
-            "latitude": "48.8566",
-            "longitude": "2.3522"
-        },
-        'Offer': {
-            "@context": "https://schema.org",
-            "@type": "Offer",
-            "price": "29.99",
-            "priceCurrency": "EUR",
-            "availability": "https://schema.org/InStock",
-            "validFrom": "2024-01-01",
-            "validThrough": "2024-12-31"
-        },
-        'JobPosting': {
-            "@context": "https://schema.org",
-            "@type": "JobPosting",
-            "title": "Intitulé du poste",
-            "description": "Description du poste",
-            "hiringOrganization": {
-                "@type": "Organization",
-                "name": "Nom de l'entreprise"
-            },
-            "jobLocation": {
-                "@type": "Place",
-                "address": {
-                    "@type": "PostalAddress",
-                    "addressLocality": "Paris",
-                    "addressCountry": "FR"
-                }
-            },
-            "employmentType": "FULL_TIME",
-            "datePosted": "2024-01-01"
-        },
-        
-        # FAQ/HowTo
-        'FAQPage': {
-            "@context": "https://schema.org",
-            "@type": "FAQPage",
-            "mainEntity": [
-                {
-                    "@type": "Question",
-                    "name": "Question fréquente ?",
-                    "acceptedAnswer": {
-                        "@type": "Answer",
-                        "text": "Réponse à la question fréquente."
-                    }
-                }
-            ]
-        },
-        'HowTo': {
-            "@context": "https://schema.org",
-            "@type": "HowTo",
-            "name": "Comment faire quelque chose",
-            "description": "Description du tutoriel",
-            "step": [
-                {
-                    "@type": "HowToStep",
-                    "text": "Première étape"
-                },
-                {
-                    "@type": "HowToStep",
-                    "text": "Deuxième étape"
-                }
-            ]
-        },
-        
-        # Navigation
-        'BreadcrumbList': {
-            "@context": "https://schema.org",
-            "@type": "BreadcrumbList",
-            "itemListElement": [
-                {
-                    "@type": "ListItem",
-                    "position": 1,
-                    "name": "Accueil",
-                    "item": "https://www.example.com"
-                },
-                {
-                    "@type": "ListItem",
-                    "position": 2,
-                    "name": "Catégorie",
-                    "item": "https://www.example.com/category"
-                },
-                {
-                    "@type": "ListItem",
-                    "position": 3,
-                    "name": "Page actuelle"
-                }
-            ]
-        },
-        'ItemList': {
-            "@context": "https://schema.org",
-            "@type": "ItemList",
-            "name": "Liste d'éléments",
-            "itemListElement": [
-                {
-                    "@type": "ListItem",
-                    "position": 1,
-                    "name": "Premier élément"
-                },
-                {
-                    "@type": "ListItem",
-                    "position": 2,
-                    "name": "Deuxième élément"
-                }
-            ]
-        },
-        'ListItem': {
-            "@context": "https://schema.org",
-            "@type": "ListItem",
-            "position": 1,
-            "name": "Nom de l'élément",
-            "item": "https://www.example.com/item"
-        },
-        
-        # Medical types
-        'MedicalEntity': {
-            "@context": "https://schema.org",
-            "@type": "MedicalEntity",
-            "name": "Entité médicale",
-            "description": "Description médicale"
-        },
-        'MedicalCondition': {
-            "@context": "https://schema.org",
-            "@type": "MedicalCondition",
-            "name": "Condition médicale",
-            "description": "Description de la condition"
-        },
-        'Drug': {
-            "@context": "https://schema.org",
-            "@type": "Drug",
-            "name": "Nom du médicament",
-            "activeIngredient": "Principe actif"
-        },
-        'MedicalProcedure': {
-            "@context": "https://schema.org",
-            "@type": "MedicalProcedure",
-            "name": "Procédure médicale",
-            "description": "Description de la procédure"
-        },
-        
-        # Social Media
-        'SocialMediaPosting': {
-            "@context": "https://schema.org",
-            "@type": "SocialMediaPosting",
-            "headline": "Titre du post",
-            "articleBody": "Contenu du post",
-            "author": {
-                "@type": "Person",
-                "name": "Auteur"
-            },
-            "datePublished": "2024-01-01"
-        },
-        
-        # Vehicle types
-        'Vehicle': {
-            "@context": "https://schema.org",
-            "@type": "Vehicle",
-            "name": "Nom du véhicule",
-            "brand": {
-                "@type": "Brand",
-                "name": "Marque"
-            },
-            "model": "Modèle",
-            "vehicleModelDate": "2024"
-        },
-        'Car': {
-            "@context": "https://schema.org",
-            "@type": "Car",
-            "name": "Voiture",
-            "brand": {
-                "@type": "Brand",
-                "name": "Constructeur"
-            },
-            "model": "Modèle",
-            "fuelType": "Essence"
-        },
-        
-        # Real Estate
-        'RealEstateListing': {
-            "@context": "https://schema.org",
-            "@type": "RealEstateListing",
-            "name": "Annonce immobilière",
-            "description": "Description du bien",
-            "price": "250000",
-            "priceCurrency": "EUR",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            }
-        },
-        'House': {
-            "@context": "https://schema.org",
-            "@type": "House",
-            "name": "Maison",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            },
-            "numberOfRooms": "5"
-        },
-        'Apartment': {
-            "@context": "https://schema.org",
-            "@type": "Apartment",
-            "name": "Appartement",
-            "address": {
-                "@type": "PostalAddress",
-                "streetAddress": "123 Rue Example",
-                "addressLocality": "Paris",
-                "postalCode": "75001",
-                "addressCountry": "FR"
-            },
-            "numberOfRooms": "3"
-        },
-        
-        # Sports
-        'SportsTeam': {
-            "@context": "https://schema.org",
-            "@type": "SportsTeam",
-            "name": "Nom de l'équipe",
-            "sport": "Football",
-            "location": {
-                "@type": "Place",
-                "name": "Ville"
-            }
-        },
-        'SportsOrganization': {
-            "@context": "https://schema.org",
-            "@type": "SportsOrganization",
-            "name": "Organisation sportive",
-            "sport": "Football"
-        },
-        
-        # Gaming
-        'Game': {
-            "@context": "https://schema.org",
-            "@type": "Game",
-            "name": "Nom du jeu",
-            "description": "Description du jeu",
-            "genre": "Action"
-        },
-        'VideoGame': {
-            "@context": "https://schema.org",
-            "@type": "VideoGame",
-            "name": "Nom du jeu vidéo",
-            "description": "Description du jeu",
-            "gamePlatform": "PC, PlayStation, Xbox"
-        },
-        
-        # Music
-        'MusicGroup': {
-            "@context": "https://schema.org",
-            "@type": "MusicGroup",
-            "name": "Nom du groupe",
-            "genre": "Rock",
-            "member": [
-                {
-                    "@type": "Person",
-                    "name": "Membre 1"
-                }
-            ]
-        },
-        'MusicAlbum': {
-            "@context": "https://schema.org",
-            "@type": "MusicAlbum",
-            "name": "Nom de l'album",
-            "byArtist": {
-                "@type": "MusicGroup",
-                "name": "Artiste"
-            },
-            "datePublished": "2024-01-01"
-        },
-        'MusicRecording': {
-            "@context": "https://schema.org",
-            "@type": "MusicRecording",
-            "name": "Titre de la chanson",
-            "byArtist": {
-                "@type": "MusicGroup",
-                "name": "Artiste"
-            },
-            "duration": "PT3M30S"
-        },
-        
-        # Financial
-        'FinancialProduct': {
-            "@context": "https://schema.org",
-            "@type": "FinancialProduct",
-            "name": "Produit financier",
-            "description": "Description du produit"
-        },
-        'BankAccount': {
-            "@context": "https://schema.org",
-            "@type": "BankAccount",
-            "name": "Compte bancaire",
-            "provider": {
-                "@type": "BankOrCreditUnion",
-                "name": "Banque"
-            }
-        },
-        'LoanOrCredit': {
-            "@context": "https://schema.org",
-            "@type": "LoanOrCredit",
-            "name": "Prêt ou crédit",
-            "amount": {
-                "@type": "MonetaryAmount",
-                "value": "10000",
-                "currency": "EUR"
-            }
-        },
-        
-        # Government
-        'GovernmentOrganization': {
-            "@context": "https://schema.org",
-            "@type": "GovernmentOrganization",
-            "name": "Organisation gouvernementale",
-            "address": {
-                "@type": "PostalAddress",
-                "addressLocality": "Paris",
-                "addressCountry": "FR"
-            }
-        },
-        'GovernmentBuilding': {
-            "@context": "https://schema.org",
-            "@type": "GovernmentBuilding",
-            "name": "Bâtiment gouvernemental",
-            "address": {
-                "@type": "PostalAddress",
-                "addressLocality": "Paris",
-                "addressCountry": "FR"
-            }
-        },
-        
-        # Compatibility types
-        'OpenGraph': {
-            "@context": "https://schema.org",
-            "@type": "WebPage",
-            "name": "Titre de la page",
-            "description": "Description pour les réseaux sociaux",
-            "image": "https://www.example.com/og-image.jpg",
-            "url": "https://www.example.com"
-        },
-        'TwitterCard': {
-            "@context": "https://schema.org",
-            "@type": "WebPage",
-            "name": "Titre pour Twitter",
-            "description": "Description pour Twitter",
-            "image": "https://www.example.com/twitter-image.jpg"
-        },
-        'MetaTags': {
-            "@context": "https://schema.org",
-            "@type": "WebPage",
-            "name": "Titre de la page",
-            "description": "Meta description de la page",
-            "keywords": "mot-clé1, mot-clé2, mot-clé3"
+class AmazonReviewsExtractor:
+    def __init__(self):
+        # Headers plus réalistes pour éviter la détection
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
         }
-    }
+        
+    def clean_url(self, url):
+        """Nettoie l'URL pour extraire l'URL de base du produit"""
+        try:
+            # Extraire l'ASIN de différents formats d'URL
+            patterns = [
+                r'/dp/([A-Z0-9]{10})',
+                r'/product/([A-Z0-9]{10})',
+                r'asin=([A-Z0-9]{10})',
+                r'/gp/product/([A-Z0-9]{10})',
+                r'/([A-Z0-9]{10})(?:/|$)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, url)
+                if match:
+                    asin = match.group(1)
+                    # Détecter le domaine Amazon
+                    if "amazon.fr" in url:
+                        return f"https://www.amazon.fr/dp/{asin}", asin
+                    elif "amazon.com" in url:
+                        return f"https://www.amazon.com/dp/{asin}", asin
+                    elif "amazon.de" in url:
+                        return f"https://www.amazon.de/dp/{asin}", asin
+                    elif "amazon.co.uk" in url:
+                        return f"https://www.amazon.co.uk/dp/{asin}", asin
+                    else:
+                        # Par défaut, amazon.fr
+                        return f"https://www.amazon.fr/dp/{asin}", asin
+            
+            return None, None
+        except Exception as e:
+            st.error(f"Erreur lors du nettoyage de l'URL: {str(e)}")
+            return None, None
     
-    # Si le type exact existe, le retourner
-    if data_type in examples:
-        return json.dumps(examples[data_type], indent=2, ensure_ascii=False)
+    def get_reviews_url(self, product_url, asin):
+        """Construit l'URL de la page des avis"""
+        try:
+            if "amazon.fr" in product_url:
+                return f"https://www.amazon.fr/product-reviews/{asin}/ref=cm_cr_dp_d_show_all_btm?ie=UTF8&reviewerType=all_reviews&sortBy=recent&pageNumber=1"
+            elif "amazon.com" in product_url:
+                return f"https://www.amazon.com/product-reviews/{asin}/ref=cm_cr_dp_d_show_all_btm?ie=UTF8&reviewerType=all_reviews&sortBy=recent&pageNumber=1"
+            elif "amazon.de" in product_url:
+                return f"https://www.amazon.de/product-reviews/{asin}/ref=cm_cr_dp_d_show_all_btm?ie=UTF8&reviewerType=all_reviews&sortBy=recent&pageNumber=1"
+            elif "amazon.co.uk" in product_url:
+                return f"https://www.amazon.co.uk/product-reviews/{asin}/ref=cm_cr_dp_d_show_all_btm?ie=UTF8&reviewerType=all_reviews&sortBy=recent&pageNumber=1"
+            else:
+                return f"https://www.amazon.fr/product-reviews/{asin}/ref=cm_cr_dp_d_show_all_btm?ie=UTF8&reviewerType=all_reviews&sortBy=recent&pageNumber=1"
+        except:
+            return None
     
-    # Sinon, essayer de trouver un type similaire (sans casse)
-    data_type_lower = data_type.lower()
-    for key in examples.keys():
-        if key.lower() == data_type_lower:
-            return json.dumps(examples[key], indent=2, ensure_ascii=False)
+    def extract_product_info(self, product_url):
+        """Extrait les informations générales du produit"""
+        try:
+            st.write(f"🔍 Extraction des infos produit depuis: {product_url}")
+            
+            # Pause aléatoire
+            time.sleep(random.uniform(2, 5))
+            
+            session = requests.Session()
+            session.headers.update(self.headers)
+            
+            response = session.get(product_url, timeout=15)
+            
+            if response.status_code != 200:
+                st.warning(f"⚠️ Code HTTP {response.status_code} pour la page produit")
+                return None
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Multiples sélecteurs pour la note moyenne (Amazon change souvent)
+            avg_rating = None
+            rating_selectors = [
+                'span.a-icon-alt',
+                'span[data-hook="rating-out-of-text"]',
+                'span.a-offscreen',
+                'i.a-icon-star span.a-offscreen',
+                '.a-icon-star .a-offscreen'
+            ]
+            
+            for selector in rating_selectors:
+                try:
+                    rating_elem = soup.select_one(selector)
+                    if rating_elem:
+                        rating_text = rating_elem.text or rating_elem.get('title', '')
+                        rating_match = re.search(r'(\d+(?:[,\.]\d+)?)', rating_text)
+                        if rating_match:
+                            avg_rating = float(rating_match.group(1).replace(',', '.'))
+                            break
+                except:
+                    continue
+            
+            # Multiples sélecteurs pour le nombre total d'avis
+            total_reviews = 0
+            review_count_selectors = [
+                'span[data-hook="total-review-count"]',
+                'a[data-hook="see-all-reviews-link-foot"]',
+                '#acrCustomerReviewText',
+                'span#acrCustomerReviewText',
+                '.a-link-normal[data-hook="see-all-reviews-link-foot"]'
+            ]
+            
+            for selector in review_count_selectors:
+                try:
+                    reviews_elem = soup.select_one(selector)
+                    if reviews_elem:
+                        reviews_text = reviews_elem.text
+                        # Recherche de nombres dans le texte
+                        numbers = re.findall(r'(\d+(?:[\s,]\d+)*)', reviews_text.replace(',', '').replace(' ', ''))
+                        if numbers:
+                            total_reviews = int(numbers[0])
+                            break
+                except:
+                    continue
+            
+            st.success(f"✅ Info produit: {avg_rating}/5 ⭐ | {total_reviews} avis")
+            
+            return {
+                'avg_rating': avg_rating,
+                'total_reviews': total_reviews
+            }
+            
+        except Exception as e:
+            st.warning(f"⚠️ Erreur lors de l'extraction des infos produit: {str(e)}")
+            return None
     
-    # Recherche partielle pour les types composés (ex: "LocalBusiness" pour "Restaurant")
-    for key in examples.keys():
-        if data_type_lower in key.lower() or key.lower() in data_type_lower:
-            return json.dumps(examples[key], indent=2, ensure_ascii=False)
+    def extract_single_review(self, review_element):
+        """Extrait les informations d'un seul avis"""
+        try:
+            review_data = {}
+            
+            # Multiples sélecteurs pour la note
+            rating = None
+            rating_selectors = [
+                'span.a-icon-alt',
+                'i.a-icon-star span.a-offscreen',
+                '.a-icon-star .a-offscreen',
+                'span[data-hook="review-star-rating"] span.a-offscreen'
+            ]
+            
+            for selector in rating_selectors:
+                try:
+                    rating_elem = review_element.select_one(selector)
+                    if rating_elem:
+                        rating_text = rating_elem.text or rating_elem.get('title', '')
+                        rating_match = re.search(r'(\d+(?:[,\.]\d+)?)', rating_text)
+                        if rating_match:
+                            rating = float(rating_match.group(1).replace(',', '.'))
+                            break
+                except:
+                    continue
+            
+            review_data['rating'] = rating
+            
+            # Multiples sélecteurs pour le contenu
+            content = ""
+            content_selectors = [
+                'span[data-hook="review-body"]',
+                '.review-text',
+                '.cr-original-review-text',
+                'div[data-hook="review-body"] span'
+            ]
+            
+            for selector in content_selectors:
+                try:
+                    content_elem = review_element.select_one(selector)
+                    if content_elem:
+                        content = content_elem.get_text(strip=True)
+                        if content and len(content) > 10:  # Au moins 10 caractères
+                            break
+                except:
+                    continue
+            
+            review_data['content'] = content
+            
+            return review_data if (rating is not None or content) else None
+            
+        except Exception as e:
+            return None
     
-    # Si aucune correspondance, retourner un exemple générique
-    generic_example = {
-        "@context": "https://schema.org",
-        "@type": data_type,
-        "name": f"Exemple de {data_type}",
-        "description": f"Description générique pour le type {data_type}",
-        "url": "https://www.example.com"
-    }
-    
-    return json.dumps(generic_example, indent=2, ensure_ascii=False)
+    def extract_reviews_for_product(self, original_url, max_pages=3):
+        """Extrait les avis d'un produit spécifique"""
+        try:
+            # Nettoyer l'URL
+            clean_url, asin = self.clean_url(original_url)
+            
+            if not clean_url or not asin:
+                st.error(f"❌ Impossible d'extraire l'ASIN depuis: {original_url}")
+                return None
+            
+            st.info(f"🧹 URL nettoyée: {clean_url}")
+            st.info(f"🆔 ASIN détecté: {asin}")
+            
+            # Extraction des informations générales du produit
+            product_info = self.extract_product_info(clean_url)
+            
+            # URL des avis
+            reviews_url = self.get_reviews_url(clean_url, asin)
+            if not reviews_url:
+                st.error("❌ Impossible de construire l'URL des avis")
+                return None
+            
+            st.info(f"📄 URL des avis: {reviews_url}")
+            
+            reviews = []
+            session = requests.Session()
+            session.headers.update(self.headers)
+            
+            # Extraction des avis détaillés
+            for page in range(1, max_pages + 1):
+                try:
+                    st.write(f"📖 Extraction page {page}/{max_pages}...")
+                    
+                    current_url = reviews_url.replace('pageNumber=1', f'pageNumber={page}')
+                    time.sleep(random.uniform(3, 6))  # Pause plus longue
+                    
+                    response = session.get(current_url, timeout=15)
+                    
+                    if response.status_code != 200:
+                        st.warning(f"⚠️ Code HTTP {response.status_code} pour la page {page}")
+                        continue
+                    
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    
+                    # Multiples sélecteurs pour les avis
+                    review_selectors = [
+                        'div[data-hook="review"]',
+                        '.review',
+                        '.cr-original-review-text',
+                        'div.a-section.review'
+                    ]
+                    
+                    review_elements = []
+                    for selector in review_selectors:
+                        elements = soup.select(selector)
+                        if elements:
+                            review_elements = elements
+                            break
+                    
+                    if not review_elements:
+                        st.warning(f"⚠️ Aucun avis trouvé sur la page {page}")
+                        # Essayer avec d'autres sélecteurs
+                        all_divs = soup.find_all('div', class_=True)
+                        review_elements = [div for div in all_divs if 'review' in ' '.join(div.get('class', [])).lower()]
+                    
+                    if not review_elements:
+                        st.warning(f"⚠️ Aucune structure d'avis détectée page {page}")
+                        break
+                    
+                    page_reviews = 0
+                    for review_element in review_elements:
+                        review_data = self.extract_single_review(review_element)
+                        if review_data and review_data.get('content'):
+                            reviews.append(review_data)
+                            page_reviews += 1
+                    
+                    st.success(f"✅ Page {page}: {page_reviews} avis extraits")
+                    
+                    if page_reviews == 0:
+                        st.warning("⚠️ Aucun avis avec contenu trouvé, arrêt de l'extraction")
+                        break
+                    
+                    # Vérifier s'il y a une page suivante
+                    next_disabled = soup.select_one('li.a-disabled.a-last')
+                    if next_disabled:
+                        st.info("📄 Dernière page atteinte")
+                        break
+                        
+                except Exception as e:
+                    st.error(f"❌ Erreur page {page}: {str(e)}")
+                    continue
+            
+            return {
+                'product_info': product_info,
+                'reviews': reviews,
+                'asin': asin,
+                'clean_url': clean_url
+            }
+            
+        except Exception as e:
+            st.error(f"❌ Erreur générale pour {original_url}: {str(e)}")
+            return None
 
-def compare_structured_data(client_data: Dict[str, List[Dict]], competitors_data: Dict[str, Dict[str, List[Dict]]]) -> Dict[str, Dict]:
-    """Compare les données structurées et retourne un dictionnaire organisé avec les résultats"""
-    client_types = get_data_types_set(client_data)
+def process_batch_urls(urls, max_pages_per_product=3, progress_placeholder=None):
+    """Traite une liste d'URLs en batch"""
+    extractor = AmazonReviewsExtractor()
+    analyzer = SentimentAnalyzer()
+    results = []
     
-    missing_data = {}
-    all_competitor_types = set()
+    total_urls = len(urls)
     
-    # Collecter tous les types présents chez les concurrents
-    for competitor_name, competitor_data in competitors_data.items():
-        competitor_types = get_data_types_set(competitor_data)
-        all_competitor_types.update(competitor_types)
-        
-        # Données présentes chez le concurrent mais absentes chez le client
-        missing_types = competitor_types - client_types
-        
-        for data_type in missing_types:
-            if data_type not in missing_data:
-                missing_data[data_type] = {
-                    'competitors_with_data': [],
-                    'example_from_competitor': None,
-                    'schema_org_example': get_schema_org_example(data_type)
-                }
+    for i, url in enumerate(urls):
+        if progress_placeholder:
+            progress_placeholder.progress((i + 1) / total_urls)
             
-            missing_data[data_type]['competitors_with_data'].append(competitor_name)
+        st.subheader(f"🔄 URL {i+1}/{total_urls}")
+        st.write(f"**URL originale:** {url}")
+        
+        # Extraction des données pour ce produit
+        product_data = extractor.extract_reviews_for_product(url.strip(), max_pages_per_product)
+        
+        if product_data and product_data['reviews']:
+            product_info = product_data['product_info'] or {}
+            reviews = product_data['reviews']
             
-            # Récupérer un exemple depuis le concurrent si pas encore fait
-            if missing_data[data_type]['example_from_competitor'] is None:
-                competitor_flattened = flatten_data_for_comparison(competitor_data)
-                matching_keys = [k for k in competitor_flattened.keys() if data_type in k]
-                if matching_keys:
-                    missing_data[data_type]['example_from_competitor'] = json.dumps(
-                        competitor_flattened[matching_keys[0]], 
-                        indent=2, 
-                        ensure_ascii=False
-                    )
+            # Calcul des statistiques
+            total_reviews = product_info.get('total_reviews', len(reviews))
+            avg_rating = product_info.get('avg_rating')
+            if not avg_rating and reviews:
+                # Calcul de la moyenne sur les avis extraits
+                ratings = [r['rating'] for r in reviews if r['rating'] is not None]
+                avg_rating = sum(ratings) / len(ratings) if ratings else None
+            
+            # Création d'une ligne par avis
+            for review in reviews:
+                if review.get('content'):  # Seulement les avis avec commentaire
+                    sentiment = analyzer.analyze_sentiment(review['content'])
+                    
+                    results.append({
+                        'url': url.strip(),
+                        'nombre_avis': total_reviews,
+                        'nombre_commentaires_client': len(reviews),
+                        'moyenne_avis': round(avg_rating, 1) if avg_rating else None,
+                        'avis_notation': review.get('rating'),
+                        'commentaire_associe': review['content'],
+                        'sentiment': sentiment
+                    })
+            
+            st.success(f"✅ **Résultat:** {len(reviews)} avis extraits avec succès!")
+        else:
+            st.error(f"❌ **Échec:** Aucun avis extrait pour cette URL")
+            # Ajouter une ligne vide pour cette URL
+            results.append({
+                'url': url.strip(),
+                'nombre_avis': 0,
+                'nombre_commentaires_client': 0,
+                'moyenne_avis': None,
+                'avis_notation': None,
+                'commentaire_associe': "Aucun avis extrait",
+                'sentiment': "N/A"
+            })
+        
+        st.markdown("---")
     
-    return missing_data
+    return results
 
 def main():
-    st.set_page_config(
-        page_title="Comparateur de données structurées",
-        layout="wide"
+    st.title("📝 Extracteur d'avis Amazon - Version Améliorée")
+    st.markdown("---")
+    
+    # Avertissement légal
+    with st.expander("⚠️ Avertissement important", expanded=True):
+        st.warning("""
+        **Utilisation responsable uniquement:**
+        - Cet outil est destiné à un usage éducatif et de recherche
+        - Respectez les conditions d'utilisation d'Amazon
+        - Le traitement peut prendre beaucoup de temps (pauses anti-détection)
+        - Amazon peut bloquer les requêtes automatisées
+        - Testez d'abord avec une seule URL
+        """)
+    
+    # Mode de test pour debug
+    st.sidebar.header("🛠️ Mode Debug")
+    debug_mode = st.sidebar.checkbox("Activer le mode debug (plus de logs)")
+    
+    # Choix du mode
+    mode = st.radio(
+        "🎯 Mode d'extraction:",
+        ["URL unique (recommandé pour test)", "Traitement en batch"],
+        horizontal=True
     )
     
-    # Style CSS pour le bouton
-    st.markdown("""
-    <style>
-    .stButton > button {
-        background-color: #f6f6ec !important;
-        color: #76520e !important;
-        border: 1px solid #76520e !important;
-    }
-    .stButton > button:hover {
-        background-color: #eeeedc !important;
-        color: #76520e !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    st.title("Comparateur de données structurées")
-    st.markdown("Analysez et comparez les données structurées entre votre site et vos concurrents")
-    
-    # Zone d'entrée pour le client
-    st.header("Votre site web")
-    client_html = st.text_area(
-        "Collez le code HTML complet de votre page :",
-        height=200,
-        placeholder="<html>...</html>"
-    )
-    
-    # Zones d'entrée pour les concurrents
-    st.header("Sites concurrents")
-    
-    num_competitors = st.number_input(
-        "Nombre de concurrents à analyser :",
-        min_value=1,
-        max_value=10,
-        value=2
-    )
-    
-    competitors_data = {}
-    for i in range(num_competitors):
-        col1, col2 = st.columns([1, 4])
+    if mode == "URL unique (recommandé pour test)":
+        st.subheader("🧪 Test avec une URL unique")
+        
+        col1, col2 = st.columns([2, 1])
+        
         with col1:
-            competitor_name = st.text_input(
-                f"Nom concurrent {i+1}:",
-                value=f"Concurrent {i+1}",
-                key=f"name_{i}"
+            product_url = st.text_input(
+                "🔗 URL du produit Amazon:",
+                placeholder="https://www.amazon.fr/dp/XXXXXXXXXX",
+                help="Testez d'abord avec une URL pour vérifier que l'extraction fonctionne"
             )
+        
         with col2:
-            competitor_html = st.text_area(
-                f"Code HTML du concurrent {i+1} :",
-                height=150,
-                placeholder="<html>...</html>",
-                key=f"html_{i}"
+            max_pages = st.number_input(
+                "📄 Nombre de pages max:",
+                min_value=1,
+                max_value=5,
+                value=2,
+                help="Commencez avec 1-2 pages pour tester"
             )
-            
-        if competitor_html.strip():
-            competitors_data[competitor_name] = competitor_html
+        
+        if st.button("🚀 Tester l'extraction", type="primary"):
+            if product_url:
+                with st.container():
+                    st.info("🔄 **Début de l'extraction de test...**")
+                    
+                    urls = [product_url]
+                    progress_bar = st.progress(0)
+                    results = process_batch_urls(urls, max_pages, progress_bar)
+                    
+                    if results and any(r['commentaire_associe'] != "Aucun avis extrait" for r in results):
+                        df = pd.DataFrame(results)
+                        
+                        st.success(f"🎉 **Test réussi!** {len([r for r in results if r['commentaire_associe'] != 'Aucun avis extrait'])} avis extraits!")
+                        
+                        # Aperçu des résultats
+                        st.subheader("📊 Aperçu des résultats")
+                        st.dataframe(df.head(3), use_container_width=True)
+                        
+                        # Téléchargement CSV
+                        csv = df.to_csv(index=False, encoding='utf-8-sig')
+                        st.download_button(
+                            label="💾 Télécharger CSV de test",
+                            data=csv,
+                            file_name=f"test_avis_amazon_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+                    else:
+                        st.error("❌ **Test échoué** - Aucun avis n'a pu être extrait")
+                        st.info("""
+                        **Causes possibles:**
+                        - L'URL n'est pas valide ou ne contient pas d'avis
+                        - Amazon bloque les requêtes automatisées
+                        - La structure HTML a changé
+                        - Le produit n'a pas d'avis clients
+                        
+                        **Solutions:**
+                        - Vérifiez que l'URL fonctionne dans votre navigateur
+                        - Essayez avec une autre URL de produit
+                        - Attendez quelques minutes et réessayez
+                        """)
+            else:
+                st.error("❌ Veuillez saisir une URL")
     
-    # Bouton d'analyse
-    if st.button("Analyser et comparer", type="primary"):
-        if not client_html.strip():
-            st.error("Veuillez entrer le code HTML de votre site.")
-            return
+    else:
+        # Mode batch
+        st.subheader("📋 Traitement en batch")
+        st.warning("⚠️ **Recommandation:** Testez d'abord avec le mode 'URL unique' avant d'utiliser le batch")
         
-        if not competitors_data:
-            st.error("Veuillez entrer au moins un concurrent.")
-            return
+        # Options de saisie
+        input_method = st.radio(
+            "Mode de saisie des URLs:",
+            ["Saisie manuelle", "Upload fichier texte"],
+            horizontal=True
+        )
         
-        with st.spinner("Analyse en cours..."):
-            # Extraction des données structurées du client
-            client_structured_data = extract_structured_data(client_html)
-            
-            # Extraction des données structurées des concurrents
-            competitors_structured_data = {}
-            for name, html in competitors_data.items():
-                competitors_structured_data[name] = extract_structured_data(html)
-            
-            # Comparaison
-            comparison_results = compare_structured_data(client_structured_data, competitors_structured_data)
-            
-        # Affichage des résultats
-        st.header("Résultats de l'analyse")
+        urls = []
         
-        # Fonction helper pour extraire le type principal des données
-        def get_main_type(data):
-            if '@type' in data:
-                data_type = data['@type']
-                if isinstance(data_type, list):
-                    return data_type[0] if data_type else "Type inconnu"
-                return data_type
-            return "Type inconnu"
+        if input_method == "Saisie manuelle":
+            urls_text = st.text_area(
+                "🔗 URLs des produits Amazon (une par ligne):",
+                placeholder="https://www.amazon.fr/dp/XXXXXXXXXX\nhttps://www.amazon.fr/dp/YYYYYYYYYY\n...",
+                height=150
+            )
+            if urls_text:
+                urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
         
-        # 1. Données structurées déjà présentes sur votre site
-        st.subheader("Données structurées déjà présentes sur votre site")
-        if client_structured_data:
-            client_types_found = set()
-            for category, data_list in client_structured_data.items():
-                for data in data_list:
-                    main_type = get_main_type(data)
-                    if main_type != "Type inconnu":
-                        client_types_found.add(main_type)
-                        st.write(f"**{main_type}**")
-                        with st.expander("Voir le code JSON"):
-                            st.code(json.dumps(data, indent=2, ensure_ascii=False), language='json')
         else:
-            st.warning("Aucune donnée structurée trouvée sur votre site.")
+            uploaded_file = st.file_uploader(
+                "📁 Fichier texte avec les URLs (une par ligne)",
+                type=['txt']
+            )
+            if uploaded_file:
+                content = uploaded_file.read().decode('utf-8')
+                urls = [url.strip() for url in content.split('\n') if url.strip()]
         
-        # 2. Données structurées présentes chez les concurrents mais pas sur votre site
-        st.subheader("Données structurées présentes chez les concurrents mais pas sur votre site")
-        
-        if comparison_results:
-            st.info(f"**{len(comparison_results)} type(s) de données structurées** sont présents chez vos concurrents mais absents de votre site.")
+        if urls:
+            st.info(f"📊 {len(urls)} URLs détectées")
             
-            for data_type, info in comparison_results.items():
-                competitors_list = ", ".join(info['competitors_with_data'])
-                st.write(f"**{data_type}**")
-                st.write(f"*Présent chez : {competitors_list}*")
+            # Options pour le batch
+            col1, col2 = st.columns(2)
+            with col1:
+                max_pages_batch = st.number_input(
+                    "📄 Pages max par produit:",
+                    min_value=1,
+                    max_value=3,
+                    value=1,
+                    help="RECOMMANDÉ: 1 page pour éviter les blocages"
+                )
+            
+            with col2:
+                sample_urls = st.number_input(
+                    "🎯 Limiter à N URLs (0 = toutes):",
+                    min_value=0,
+                    max_value=len(urls),
+                    value=min(5, len(urls)),
+                    help="RECOMMANDÉ: Commencez avec 5 URLs max"
+                )
+            
+            # Aperçu des URLs
+            with st.expander("👀 Aperçu des URLs à traiter"):
+                display_urls = urls[:sample_urls] if sample_urls > 0 else urls
+                for i, url in enumerate(display_urls, 1):
+                    st.write(f"{i}. {url}")
+                if sample_urls > 0 and sample_urls < len(urls):
+                    st.write(f"... et {len(urls) - sample_urls} autres URLs")
+            
+            # Estimation du temps
+            urls_to_process = sample_urls if sample_urls > 0 else len(urls)
+            estimated_time = urls_to_process * max_pages_batch * 15  # ~15 sec par page avec pauses
+            st.warning(f"⏱️ **Temps estimé:** ~{estimated_time//60} minutes {estimated_time%60} secondes")
+            st.info("💡 Le processus peut être interrompu à tout moment avec Ctrl+C")
+            
+            if st.button("🚀 Lancer l'extraction en batch", type="primary"):
+                if sample_urls > 0:
+                    urls = urls[:sample_urls]
                 
-                col1, col2 = st.columns(2)
+                st.warning("🕐 **Extraction en cours...** Cela peut prendre plusieurs minutes")
                 
-                with col1:
-                    with st.expander("Voir l'exemple du concurrent"):
-                        if info['example_from_competitor']:
-                            st.code(info['example_from_competitor'], language='json')
+                progress_bar = st.progress(0)
+                results = process_batch_urls(urls, max_pages_batch, progress_bar)
+                
+                if results:
+                    df = pd.DataFrame(results)
+                    
+                    # Filtrer les résultats réussis
+                    successful_results = df[df['commentaire_associe'] != 'Aucun avis extrait']
+                    
+                    # Statistiques globales
+                    st.subheader("📊 Résultats du traitement batch")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("URLs traitées", len(df['url'].unique()))
+                    with col2:
+                        st.metric("URLs réussies", len(successful_results['url'].unique()))
+                    with col3:
+                        st.metric("Total avis", len(successful_results))
+                    with col4:
+                        if len(successful_results) > 0:
+                            avg_rating = successful_results['avis_notation'].mean()
+                            st.metric("Note moyenne", f"{avg_rating:.1f}/5" if pd.notna(avg_rating) else "N/A")
                         else:
-                            st.write("Aucun exemple disponible")
-                
-                with col2:
-                    with st.expander("Voir l'exemple Schema.org recommandé"):
-                        st.code(info['schema_org_example'], language='json')
-                
-                st.divider()
-            
-            # Créer un DataFrame pour l'export CSV
-            export_data = []
-            for data_type, info in comparison_results.items():
-                export_data.append({
-                    'Type de données manquant': data_type,
-                    'Concurrents avec cette donnée': ", ".join(info['competitors_with_data']),
-                    'Exemple Schema.org': info['schema_org_example'],
-                    'Exemple du concurrent': info['example_from_competitor'] or "Non disponible"
-                })
-            
-            export_df = pd.DataFrame(export_data)
-            
-            # Bouton de téléchargement
-            csv_buffer = io.StringIO()
-            export_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
-            csv_data = csv_buffer.getvalue()
-            
-            st.download_button(
-                label="Télécharger les résultats (CSV)",
-                data=csv_data,
-                file_name="donnees_structurees_manquantes.csv",
-                mime="text/csv"
-            )
-            
-        else:
-            st.success("Excellente nouvelle ! Votre site contient toutes les données structurées présentes chez vos concurrents.")
+                            st.metric("Note moyenne", "N/A")
+                    
+                    # Répartition des sentiments
+                    if len(successful_results) > 0:
+                        st.subheader("📈 Répartition des sentiments")
+                        sentiment_counts = successful_results['sentiment'].value_counts()
+                        st.bar_chart(sentiment_counts)
+                    
+                    # Affichage des données
+                    st.subheader("📋 Données extraites")
+                    st.dataframe(df, use_container_width=True)
+                    
+                    # Téléchargement
+                    csv = df.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="💾 Télécharger CSV complet",
+                        data=csv,
+                        file_name=f"avis_amazon_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv"
+                    )
+                    
+                    if len(successful_results) > 0:
+                        st.success(f"✅ **Traitement terminé!** {len(successful_results)} avis extraits sur {len(urls)} URLs")
+                    else:
+                        st.error("❌ **Aucun avis extrait** - Toutes les URLs ont échoué")
+                else:
+                    st.error("❌ Aucun résultat obtenu")
+
+    # Instructions
+    with st.expander("📖 Format de sortie CSV"):
+        st.markdown("""
+        **Colonnes du fichier CSV exporté:**
+        - `url`: URL du produit Amazon
+        - `nombre_avis`: Nombre total d'avis pour ce produit
+        - `nombre_commentaires_client`: Nombre de commentaires extraits
+        - `moyenne_avis`: Note moyenne du produit (sur 5)
+        - `avis_notation`: Note de cet avis spécifique (1-5 étoiles)
+        - `commentaire_associe`: Texte du commentaire client
+        - `sentiment`: Analyse de sentiment (Positif/Négatif/Neutre)
         
-        # 3 et 4. Données structurées de chaque concurrent
-        competitor_names = list(competitors_structured_data.keys())
+        **Note:** Il y a une ligne par avis/commentaire extrait.
+        """)
+    
+    with st.expander("🔧 Installation et utilisation"):
+        st.markdown("""
+        **Installation:**
+        ```bash
+        pip install -r requirements.txt
+        python -m textblob.download_corpora
+        streamlit run amazon_reviews_extractor.py
+        ```
         
-        for idx, (competitor_name, competitor_data) in enumerate(competitors_structured_data.items(), 1):
-            st.subheader(f"Données structurées présentes chez {competitor_name}")
-            
-            if competitor_data:
-                competitor_types_found = set()
-                for category, data_list in competitor_data.items():
-                    for data in data_list:
-                        main_type = get_main_type(data)
-                        if main_type != "Type inconnu":
-                            if main_type not in competitor_types_found:
-                                competitor_types_found.add(main_type)
-                                st.write(f"**{main_type}**")
-                                with st.expander("Voir le code JSON"):
-                                    st.code(json.dumps(data, indent=2, ensure_ascii=False), language='json')
-            else:
-                st.warning(f"Aucune donnée structurée trouvée pour {competitor_name}")
-        
-        # Statistiques globales
-        st.subheader("Statistiques globales")
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            missing_count = len(comparison_results) if comparison_results else 0
-            st.metric("Types de données manquants", missing_count)
-        
-        with col2:
-            total_competitors = len(competitors_structured_data)
-            st.metric("Concurrents analysés", total_competitors)
-        
-        with col3:
-            if comparison_results:
-                most_common = max(comparison_results.items(), key=lambda x: len(x[1]['competitors_with_data']))[0]
-            else:
-                most_common = "N/A"
-            st.metric("Type le plus fréquent manquant", most_common)
+        **Conseils d'utilisation:**
+        - Commencez toujours par tester une URL unique
+        - Utilisez des pauses entre les extractions batch
+        - Limitez le nombre de pages pour éviter les blocages
+        - Si vous êtes bloqué, attendez quelques heures avant de réessayer
+        """)
 
 if __name__ == "__main__":
     main()
